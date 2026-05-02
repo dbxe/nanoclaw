@@ -141,3 +141,18 @@ export function getUndeliveredMessages(): MessageOutRow[] {
     )
     .all() as MessageOutRow[];
 }
+
+export function getMaxMessageOutSeq(): number {
+  const row = getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number };
+  return row.m;
+}
+
+export function getMessagesOutAfterSeq(seq: number): MessageOutRow[] {
+  return getOutboundDb()
+    .prepare(
+      `SELECT * FROM messages_out
+       WHERE seq > ?
+       ORDER BY seq ASC`,
+    )
+    .all(seq) as MessageOutRow[];
+}

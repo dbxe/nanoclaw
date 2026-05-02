@@ -36,7 +36,7 @@ export const scheduleTask: McpToolDefinition = {
   tool: {
     name: 'schedule_task',
     description:
-      `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
+      `Schedule a one-shot or recurring task. If a mounted MCP server or group instruction requires a domain-specific monitor-plan or evidence tool before scheduling, call that domain tool first and preserve its required evidence in the final answer. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
     inputSchema: {
       type: 'object' as const,
       properties: {

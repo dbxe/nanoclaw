@@ -29,6 +29,9 @@ function socketPath(): string {
 
 function main(): void {
   const words = process.argv.slice(2);
+  if (words[0] === '--') {
+    words.shift();
+  }
   if (words.length === 0) {
     console.error('usage: pnpm run chat <message...>');
     process.exit(1);

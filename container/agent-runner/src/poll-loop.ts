@@ -1,6 +1,11 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import {
+  getMaxMessageOutSeq,
+  getMessagesOutAfterSeq,
+  writeMessageOut,
+  type MessageOutRow,
+} from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -245,6 +250,66 @@ interface QueryResult {
   continuation?: string;
 }
 
+function parseActionRow(row: MessageOutRow): { action?: string; taskId?: string; processAfter?: string; recurrence?: string; prompt?: string } {
+  try {
+    const parsed = JSON.parse(row.content) as {
+      action?: string;
+      taskId?: string;
+      processAfter?: string;
+      recurrence?: string;
+      prompt?: string;
+    };
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function actionRowsSince(seq: number): Array<{ row: MessageOutRow; action: ReturnType<typeof parseActionRow> }> {
+  return getMessagesOutAfterSeq(seq)
+    .filter((row) => row.kind === 'system')
+    .map((row) => ({ row, action: parseActionRow(row) }))
+    .filter(({ action }) => typeof action.action === 'string');
+}
+
+function hasUserVisibleMessageSince(seq: number): boolean {
+  return getMessagesOutAfterSeq(seq).some((row) => row.kind === 'chat' || row.kind === 'chat-sdk');
+}
+
+function formatActionSummary(action: ReturnType<typeof parseActionRow>): string {
+  if (action.action === 'schedule_task') {
+    const parts = [`schedule_task id=${action.taskId ?? 'unknown'}`];
+    if (action.processAfter) parts.push(`firstRun=${action.processAfter}`);
+    if (action.recurrence) parts.push(`recurrence=${action.recurrence}`);
+    if (action.prompt) parts.push(`prompt=${action.prompt}`);
+    return parts.join(' ');
+  }
+  return action.action ?? 'unknown_action';
+}
+
+function buildEmptyResultRecoveryPrompt(actions: Array<{ action: ReturnType<typeof parseActionRow> }>): string {
+  const summaries = actions.map(({ action }) => `- ${formatActionSummary(action)}`).join('\n');
+  return [
+    'You completed one or more actions but did not send a user-facing response.',
+    'Send the concise final acknowledgement now. Do not call more tools unless necessary.',
+    'Mention only actions that succeeded.',
+    'If this was a domain monitor request and prior tool output contained a required event_query block, include that block exactly.',
+    '',
+    'Completed actions:',
+    summaries,
+  ].join('\n');
+}
+
+function buildEmptyResultFallback(actions: Array<{ action: ReturnType<typeof parseActionRow> }>): string {
+  const scheduled = actions.find(({ action }) => action.action === 'schedule_task')?.action;
+  if (scheduled) {
+    const cadence = scheduled.recurrence ? ` with recurrence \`${scheduled.recurrence}\`` : '';
+    const firstRun = scheduled.processAfter ? ` First run: \`${scheduled.processAfter}\`.` : '';
+    return `Done — I scheduled the task${cadence}.${firstRun}`;
+  }
+  return 'Done.';
+}
+
 async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
@@ -253,6 +318,8 @@ async function processQuery(
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let emptyActionRecoveryAttempted = false;
+  const outboundSeqAtStart = getMaxMessageOutSeq();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -340,16 +407,34 @@ async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
+        if (!event.text && !hasUserVisibleMessageSince(outboundSeqAtStart)) {
+          const actions = actionRowsSince(outboundSeqAtStart);
+          if (actions.length > 0 && !emptyActionRecoveryAttempted) {
+            emptyActionRecoveryAttempted = true;
+            log(`Empty result after ${actions.length} action(s); requesting final acknowledgement`);
+            query.push(buildEmptyResultRecoveryPrompt(actions));
+            continue;
+          }
+          if (actions.length > 0) {
+            log(`Empty recovery result after action(s); sending deterministic fallback`);
+            dispatchResultText(buildEmptyResultFallback(actions), routing);
+          }
+        }
+
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
-        // stale 'processing' claims while the query stays open for
-        // follow-up pushes. The agent may have responded via MCP
-        // (send_message) mid-turn, or the message may not need a response
-        // at all — either way the turn is finished.
+        // stale 'processing' claims after the result. The agent may have
+        // responded via MCP (send_message) mid-turn, or the message may not
+        // need a response at all — either way the turn is finished.
+        // End this provider turn after the first final result so later user
+        // messages start a fresh query with the saved continuation rather
+        // than being pushed into an already-idle stream.
         markCompleted(initialBatchIds);
         if (event.text) {
           dispatchResultText(event.text, routing);
         }
+        query.end();
+        return { continuation: queryContinuation };
       }
     }
   } finally {

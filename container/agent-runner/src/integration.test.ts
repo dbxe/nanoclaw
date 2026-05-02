@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
@@ -88,6 +88,47 @@ describe('poll loop integration', () => {
 
     const out = getUndeliveredMessages();
     expect(out.length).toBeGreaterThanOrEqual(1);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('asks for a final acknowledgement when a provider returns empty text after an action', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'Schedule this' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    let calls = 0;
+    const provider = new MockProvider({}, (prompt) => {
+      calls++;
+      if (calls === 1) {
+        writeMessageOut({
+          id: 'task-test',
+          kind: 'system',
+          platform_id: 'chan-1',
+          channel_type: 'discord',
+          content: JSON.stringify({
+            action: 'schedule_task',
+            taskId: 'task-test',
+            prompt: 'check something',
+            processAfter: '2026-05-02T13:00:00.000Z',
+            recurrence: '0 */6 * * *',
+          }),
+        });
+        return '';
+      }
+      expect(prompt).toContain('You completed one or more actions');
+      return 'Done — I scheduled the monitor.';
+    });
+
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000);
+
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out.some((row) => row.kind === 'system')).toBe(true);
+    const chat = out.find((row) => row.kind === 'chat');
+    expect(chat).toBeDefined();
+    expect(JSON.parse(chat!.content).text).toBe('Done — I scheduled the monitor.');
 
     await loopPromise.catch(() => {});
   });

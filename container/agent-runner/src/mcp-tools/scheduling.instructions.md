@@ -2,6 +2,8 @@
 
 For any recurring task, use `schedule_task`. This is the scheduling path — tasks persist across sessions and restarts, and support the pre-task `script` hook described below.
 
+If a mounted MCP server or group instruction gives a more specific workflow for a domain-specific monitoring request, follow that workflow first. For example, when a domain tool returns a monitor plan, evidence packet, or required citation block, call that domain tool before scheduling and include its required evidence in the final user-facing answer.
+
 To inspect or change existing tasks, use `list_tasks` (returns one row per series with the stable id) and `update_task` / `cancel_task` / `pause_task` / `resume_task`. Prefer `update_task` over cancel + reschedule.
 
 Frequent recurring scheduled tasks — more than a few times a day — consume API credits and can risk account restrictions. You can add a `script` that runs first, and you will only be called when the check passes.

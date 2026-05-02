@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
@@ -16,6 +17,8 @@ const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
 const STALE_SESSION_RE =
   /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
+
+const CLAUDE_IMPORT_RE = /^@(.+)$/;
 
 function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000): Promise<{ url: string; proc: ChildProcess }> {
   return new Promise((resolve, reject) => {
@@ -62,17 +65,42 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
   });
 }
 
+export function expandClaudeMdImports(filePath: string, seen: Set<string> = new Set()): string {
+  const resolvedPath = path.resolve(filePath);
+  if (seen.has(resolvedPath)) {
+    return `<!-- skipped recursive CLAUDE.md import: ${resolvedPath} -->`;
+  }
+
+  seen.add(resolvedPath);
+  const content = fs.readFileSync(resolvedPath, 'utf-8');
+  const baseDir = path.dirname(resolvedPath);
+
+  return content
+    .split('\n')
+    .map((line) => {
+      const match = line.match(CLAUDE_IMPORT_RE);
+      if (!match) return line;
+
+      const target = match[1].trim();
+      const targetPath = path.isAbsolute(target) ? target : path.resolve(baseDir, target);
+      if (!fs.existsSync(targetPath)) return line;
+
+      return expandClaudeMdImports(targetPath, seen);
+    })
+    .join('\n');
+}
+
 function readClaudeMdForPrompt(): string | undefined {
   const groupPath = '/workspace/agent/CLAUDE.md';
   const globalPath = '/workspace/global/CLAUDE.md';
   let content = '';
   if (fs.existsSync(groupPath)) {
-    content += fs.readFileSync(groupPath, 'utf-8');
+    content += expandClaudeMdImports(groupPath);
   }
   const isMain = process.env.NANOCLAW_IS_MAIN === '1';
   if (!isMain && fs.existsSync(globalPath)) {
     if (content) content += '\n\n---\n\n';
-    content += fs.readFileSync(globalPath, 'utf-8');
+    content += expandClaudeMdImports(globalPath);
   }
   return content || undefined;
 }
