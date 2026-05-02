@@ -17,6 +17,7 @@
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
     "chat": "tsx scripts/chat.ts",
+    "sponsor-proxy": "tsx scripts/sponsor-proxy.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
