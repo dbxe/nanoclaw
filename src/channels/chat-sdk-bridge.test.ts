@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Adapter } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { capSplitChunks, createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -33,6 +33,20 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('capSplitChunks', () => {
+  it('keeps chunks unchanged when under the cap', () => {
+    expect(capSplitChunks(['one', 'two'], 3, 20)).toEqual(['one', 'two']);
+  });
+
+  it('caps pathological split output and appends a notice', () => {
+    const chunks = ['a'.repeat(10), 'b'.repeat(10), 'c'.repeat(10), 'd'.repeat(10)];
+    const capped = capSplitChunks(chunks, 2, 40);
+    expect(capped).toHaveLength(2);
+    expect(capped[1]).toContain('Message truncated');
+    expect(capped[1].length).toBeLessThanOrEqual(40);
   });
 });
 

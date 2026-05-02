@@ -72,6 +72,11 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+  /**
+   * Safety cap for split deliveries. If an agent produces pathological output,
+   * avoid flooding the chat transport and hitting platform rate limits.
+   */
+  maxTextChunks?: number;
 }
 
 /**
@@ -115,6 +120,35 @@ export function splitForLimit(text: string, limit: number): string[] {
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
+}
+
+export function capSplitChunks(chunks: string[], maxChunks: number | undefined, limit?: number): string[] {
+  if (!maxChunks || chunks.length <= maxChunks) return chunks;
+  const capped = chunks.slice(0, maxChunks);
+  const notice = `\n\n[Message truncated: generated ${chunks.length} chunks; showing first ${maxChunks}.]`;
+  const last = capped[capped.length - 1] ?? '';
+  if (limit && notice.length > limit) {
+    capped[capped.length - 1] = notice.slice(0, limit);
+  } else if (limit && last.length + notice.length > limit) {
+    capped[capped.length - 1] = `${last.slice(0, Math.max(0, limit - notice.length)).trimEnd()}${notice}`;
+  } else {
+    capped[capped.length - 1] = `${last}${notice}`;
+  }
+  return capped;
+}
+
+function retryAfterMsFromError(err: unknown): number | undefined {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes('429')) return undefined;
+  const match = message.match(/"retry_after"\s*:\s*([0-9.]+)/);
+  if (!match) return 1_000;
+  const seconds = Number.parseFloat(match[1]);
+  if (!Number.isFinite(seconds) || seconds < 0) return 1_000;
+  return Math.ceil(seconds * 1_000) + 250;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -410,18 +444,41 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
-        const chunks =
+        const splitChunks =
           config.maxTextLength && text.length > config.maxTextLength
             ? splitForLimit(text, config.maxTextLength)
             : [text];
+        const chunks = capSplitChunks(splitChunks, config.maxTextChunks, config.maxTextLength);
+        if (chunks.length < splitChunks.length) {
+          log.warn('Outbound message truncated before delivery', {
+            adapter: adapter.name,
+            originalChunks: splitChunks.length,
+            deliveredChunks: chunks.length,
+          });
+        }
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          let result: Awaited<ReturnType<Adapter['postMessage']>> | undefined;
+          for (let attempt = 0; attempt < 5; attempt++) {
+            try {
+              result = await adapter.postMessage(
+                tid,
+                attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
+              );
+              break;
+            } catch (err) {
+              const retryAfterMs = retryAfterMsFromError(err);
+              if (retryAfterMs === undefined || attempt === 4) throw err;
+              log.warn('Rate limited while delivering chat chunk, retrying', {
+                adapter: adapter.name,
+                attempt: attempt + 1,
+                retryAfterMs,
+              });
+              await sleep(retryAfterMs);
+            }
+          }
           if (i === 0) firstId = result?.id;
         }
         return firstId;
