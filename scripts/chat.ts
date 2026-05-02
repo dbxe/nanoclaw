@@ -5,7 +5,8 @@
  *   pnpm run chat <message...>
  *
  * Sends the message through the CLI channel (Unix socket) to the wired agent.
- * Reads replies until the stream goes quiet, then exits.
+ * Reads replies until the stream stays quiet long enough to treat the turn as
+ * finished, then exits.
  *
  * Preconditions: NanoClaw host service running, an agent group wired to
  * `cli/local` via `/init-first-agent` or `/manage-channels`.
@@ -15,8 +16,12 @@ import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
 
-const SILENCE_MS = 2000; // exit after this much quiet time following the first reply
-const TOTAL_TIMEOUT_MS = 120_000; // hard stop
+// Long-running inference is normal for live maintainer validation. Give the
+// agent ample time to produce a first token, surface periodic progress while
+// waiting, then treat a shorter quiet period after replies begin as end-of-turn.
+const SILENCE_MS = 15_000;
+const TOTAL_TIMEOUT_MS = 15 * 60_000;
+const WAITING_LOG_MS = 30_000;
 
 function socketPath(): string {
   return path.join(DATA_DIR, 'cli.sock');
@@ -46,6 +51,7 @@ function main(): void {
   let firstReplySeen = false;
   let silenceTimer: NodeJS.Timeout | null = null;
   let hardTimer: NodeJS.Timeout | null = null;
+  let waitingTimer: NodeJS.Timeout | null = null;
 
   function scheduleExit(): void {
     if (silenceTimer) clearTimeout(silenceTimer);
@@ -57,6 +63,12 @@ function main(): void {
 
   socket.on('connect', () => {
     socket.write(JSON.stringify({ text }) + '\n');
+    const startedAt = Date.now();
+    waitingTimer = setInterval(() => {
+      if (firstReplySeen) return;
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      console.error(`waiting: no reply yet after ${elapsedSeconds}s`);
+    }, WAITING_LOG_MS);
     hardTimer = setTimeout(() => {
       if (!firstReplySeen) {
         console.error(`timeout: no reply in ${TOTAL_TIMEOUT_MS}ms`);
@@ -83,6 +95,10 @@ function main(): void {
             clearTimeout(hardTimer);
             hardTimer = null;
           }
+          if (waitingTimer) {
+            clearInterval(waitingTimer);
+            waitingTimer = null;
+          }
           scheduleExit();
         }
       } catch {
@@ -94,6 +110,7 @@ function main(): void {
   socket.on('close', () => {
     if (silenceTimer) clearTimeout(silenceTimer);
     if (hardTimer) clearTimeout(hardTimer);
+    if (waitingTimer) clearInterval(waitingTimer);
     process.exit(firstReplySeen ? 0 : 3);
   });
 }
