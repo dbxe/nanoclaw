@@ -149,6 +149,7 @@ function startOpenAiCompatProxy(targetBaseUrl: string): Promise<{ baseUrl: strin
           const payload = JSON.parse(body.toString('utf8'));
           if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
             delete payload.promptCacheKey;
+            delete payload.reasoning_effort;
           }
           body = JSON.stringify(payload);
         }
