@@ -143,10 +143,11 @@ function startOpenAiCompatProxy(targetBaseUrl: string): Promise<{ baseUrl: strin
           chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         }
 
-        let body: Buffer | string | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
+        const rawBody = chunks.length ? Buffer.concat(chunks).toString('utf8') : undefined;
+        let body: string | undefined = rawBody;
         const contentType = req.headers['content-type'] || '';
-        if (body && String(contentType).includes('application/json')) {
-          const payload = JSON.parse(body.toString('utf8'));
+        if (rawBody && String(contentType).includes('application/json')) {
+          const payload = JSON.parse(rawBody);
           if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
             delete payload.promptCacheKey;
             delete payload.reasoning_effort;
