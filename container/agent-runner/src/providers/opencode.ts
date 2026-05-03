@@ -117,6 +117,11 @@ function wrapPromptWithContext(text: string, systemInstructions?: string): strin
   return out;
 }
 
+function positiveNumber(value: string | undefined): number | undefined {
+  const parsed = value ? Number(value) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const providerName = process.env.OPENCODE_PROVIDER_NAME || provider;
@@ -126,12 +131,15 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
   const baseUrl = process.env.OPENCODE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY || 'placeholder';
+  const outputLimit = positiveNumber(process.env.OPENCODE_MODEL_OUTPUT_LIMIT);
+  const contextLimit = positiveNumber(process.env.OPENCODE_MODEL_CONTEXT_LIMIT) ?? 32768;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
   const providerSmallModelId = smallModel ? smallModel.replace(new RegExp(`^${provider}/`), '') : undefined;
   const modelsToRegister = [providerModelId, providerSmallModelId]
     .filter(Boolean)
     .filter((mid, i, a) => a.indexOf(mid as string) === i);
+  const modelLimit = outputLimit ? { context: contextLimit, output: outputLimit } : undefined;
 
   const providerOptions: Record<string, unknown> =
     provider === 'anthropic'
@@ -144,7 +152,10 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
             ...(modelsToRegister.length > 0
               ? {
                   models: Object.fromEntries(
-                    modelsToRegister.map((mid) => [mid, { name: mid, tool_call: true }]),
+                    modelsToRegister.map((mid) => [
+                      mid,
+                      { name: mid, tool_call: true, ...(modelLimit ? { limit: modelLimit } : {}) },
+                    ]),
                   ),
                 }
               : {}),
@@ -187,6 +198,8 @@ function runtimeConfigKey(options: ProviderOptions): string {
     providerPackage: process.env.OPENCODE_PROVIDER_PACKAGE,
     baseUrl: process.env.OPENCODE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL,
     apiKey: process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY ? 'set' : 'unset',
+    contextLimit: process.env.OPENCODE_MODEL_CONTEXT_LIMIT,
+    outputLimit: process.env.OPENCODE_MODEL_OUTPUT_LIMIT,
   });
 }
 
