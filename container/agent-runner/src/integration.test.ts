@@ -3,7 +3,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
+import { setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 beforeEach(() => {
@@ -132,10 +134,44 @@ describe('poll loop integration', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('clears an invalid continuation and retries the current prompt once', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'Fresh answer please' }, { platformId: 'chan-1', channelType: 'discord' });
+    setContinuation('mock', 'old-session');
+
+    let calls = 0;
+    const provider: AgentProvider = {
+      supportsNativeSlashCommands: false,
+      isSessionInvalid: (err) => err instanceof Error && err.message.includes('exceeds the available context size'),
+      query(input: QueryInput): AgentQuery {
+        calls++;
+        if (calls === 1) {
+          expect(input.continuation).toBe('old-session');
+          return throwingQuery('request exceeds the available context size');
+        }
+
+        expect(input.continuation).toBeUndefined();
+        return resultQuery('new-session', '<message to="discord-test">Recovered</message>');
+      },
+    };
+
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Recovered');
+    expect(calls).toBe(2);
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 // Helper: run poll loop until aborted or timeout
-async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+async function runPollLoopWithTimeout(provider: AgentProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
   return Promise.race([
     runPollLoop({
       provider,
@@ -147,6 +183,29 @@ async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSigna
     }),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
   ]);
+}
+
+function throwingQuery(message: string): AgentQuery {
+  return {
+    events: (async function* (): AsyncIterableIterator<ProviderEvent> {
+      throw new Error(message);
+    })(),
+    push() {},
+    end() {},
+    abort() {},
+  };
+}
+
+function resultQuery(continuation: string, text: string): AgentQuery {
+  return {
+    events: (async function* (): AsyncIterableIterator<ProviderEvent> {
+      yield { type: 'init', continuation };
+      yield { type: 'result', text };
+    })(),
+    push() {},
+    end() {},
+    abort() {},
+  };
 }
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {

@@ -16,7 +16,7 @@ const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
 const STALE_SESSION_RE =
-  /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout|exceeds the available context size|context(?:\s|-)?window|maximum context/i;
 
 const CLAUDE_IMPORT_RE = /^@(.+)$/;
 
@@ -269,13 +269,16 @@ export class OpenCodeProvider implements AgentProvider {
       this.activeSessionId = undefined;
     }
 
-    const pending: string[] = [];
+    const pending: Array<{ text: string; includeSessionContext: boolean }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
 
     const systemInstructions = input.systemContext?.instructions;
-    pending.push(wrapPromptWithContext(input.prompt, systemInstructions));
+    pending.push({
+      text: input.prompt,
+      includeSessionContext: !input.continuation,
+    });
 
     const kick = (): void => {
       waiting?.();
@@ -300,7 +303,10 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const text = pending.shift()!;
+        const pendingPrompt = pending.shift()!;
+        const text = pendingPrompt.includeSessionContext
+          ? wrapPromptWithContext(pendingPrompt.text, systemInstructions)
+          : pendingPrompt.text;
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -440,7 +446,7 @@ export class OpenCodeProvider implements AgentProvider {
 
     return {
       push: (message: string) => {
-        pending.push(wrapPromptWithContext(message, systemInstructions));
+        pending.push({ text: message, includeSessionContext: false });
         kick();
       },
       end: () => {

@@ -165,17 +165,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+    const outboundSeqAtStart = getMaxMessageOutSeq();
     try {
+      const query = config.provider.query({
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+      });
       const result = await processQuery(query, routing, processingIds, config.providerName);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -185,13 +185,52 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
 
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
+      // Stale/corrupt/overfull continuation recovery: ask the provider whether
+      // this error means the stored continuation is unusable, and clear it.
+      // If nothing user-visible was sent, retry the same prompt once in a
+      // fresh provider session so the current turn stays responsive.
+      const shouldRetryFresh =
+        continuation !== undefined &&
+        config.provider.isSessionInvalid(err) &&
+        !hasUserVisibleMessageSince(outboundSeqAtStart);
       if (continuation && config.provider.isSessionInvalid(err)) {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
+      }
+
+      if (shouldRetryFresh) {
+        log('Retrying query in a fresh provider session');
+        try {
+          const retryQuery = config.provider.query({
+            prompt,
+            continuation: undefined,
+            cwd: config.cwd,
+            systemContext: config.systemContext,
+          });
+          const retryResult = await processQuery(retryQuery, routing, processingIds, config.providerName);
+          if (retryResult.continuation) {
+            continuation = retryResult.continuation;
+            setContinuation(config.providerName, continuation);
+          }
+          markCompleted(processingIds);
+          log(`Completed ${ids.length} message(s) after fresh-session retry`);
+          continue;
+        } catch (retryErr) {
+          const retryErrMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          log(`Fresh-session retry error: ${retryErrMsg}`);
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: `Error: ${retryErrMsg}` }),
+          });
+          markCompleted(processingIds);
+          log(`Completed ${ids.length} message(s) after failed fresh-session retry`);
+          continue;
+        }
       }
 
       // Write error response so the user knows something went wrong
