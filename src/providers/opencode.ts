@@ -7,7 +7,7 @@
  * (read on the host, injected into the container). For OpenAI-compatible
  * backends we also pass through explicit base URL / API key overrides so a
  * group can talk directly to a `/v1/chat/completions` endpoint without
- * relying on Anthropic-shaped config names or Codex-specific auth flows. 
+ * relying on Anthropic-shaped config names or Codex-specific auth flows.
  * NO_PROXY / no_proxy are merged with host values so the in-container
  * OpenCode client can talk to 127.0.0.1 even when HTTPS_PROXY is set.
  */
