@@ -151,6 +151,10 @@ function startOpenAiCompatProxy(targetBaseUrl: string): Promise<{ baseUrl: strin
           if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
             delete payload.promptCacheKey;
             delete payload.reasoning_effort;
+            if ('max_tokens' in payload && !('max_completion_tokens' in payload)) {
+              payload.max_completion_tokens = payload.max_tokens;
+              delete payload.max_tokens;
+            }
           }
           body = JSON.stringify(payload);
         }
