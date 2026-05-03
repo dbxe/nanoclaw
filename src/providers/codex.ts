@@ -37,7 +37,7 @@ registerProviderContainerConfig('codex', (ctx) => {
     }
   }
 
-  const dotenv = readEnvFile(['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL']);
+  const dotenv = readEnvFile(['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL', 'ONECLI_URL']);
   const env: Record<string, string> = {};
   for (const key of ['CODEX_MODEL', 'OPENAI_BASE_URL'] as const) {
     const value = ctx.hostEnv[key] || dotenv[key];
@@ -46,6 +46,12 @@ registerProviderContainerConfig('codex', (ctx) => {
   const apiKey = ctx.hostEnv.OPENAI_API_KEY || dotenv.OPENAI_API_KEY;
   if (apiKey || env.OPENAI_BASE_URL) {
     env.OPENAI_API_KEY = apiKey || 'placeholder';
+  }
+  if (ctx.hostEnv.ONECLI_URL || dotenv.ONECLI_URL) {
+    const oneCliCaPath = ctx.hostEnv.NODE_EXTRA_CA_CERTS || '/tmp/onecli-gateway-ca.pem';
+    env.SSL_CERT_FILE = ctx.hostEnv.SSL_CERT_FILE || oneCliCaPath;
+    env.REQUESTS_CA_BUNDLE = ctx.hostEnv.REQUESTS_CA_BUNDLE || oneCliCaPath;
+    env.CURL_CA_BUNDLE = ctx.hostEnv.CURL_CA_BUNDLE || oneCliCaPath;
   }
 
   return {
