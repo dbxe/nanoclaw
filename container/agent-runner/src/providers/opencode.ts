@@ -257,7 +257,7 @@ function buildOpenCodeConfig(options: ProviderOptions, baseUrlOverride?: string)
           },
         };
 
-  const mcp = mcpServersToOpenCodeConfig(options.mcpServers);
+  const mcp = mcpServersToOpenCodeConfig(options.mcpServers, options.env);
 
   return {
     $schema: 'https://opencode.ai/config.json',
@@ -286,7 +286,7 @@ let sharedInit: Promise<SharedRuntime> | null = null;
 
 function runtimeConfigKey(options: ProviderOptions): string {
   return JSON.stringify({
-    mcp: mcpServersToOpenCodeConfig(options.mcpServers),
+    mcp: mcpServersToOpenCodeConfig(options.mcpServers, options.env),
     model: process.env.OPENCODE_MODEL,
     small: process.env.OPENCODE_SMALL_MODEL,
     op: process.env.OPENCODE_PROVIDER,

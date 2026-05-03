@@ -1,5 +1,19 @@
 import type { McpServerConfig } from './types.js';
 
+const MCP_NETWORK_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'NODE_USE_ENV_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'REQUESTS_CA_BUNDLE',
+  'CURL_CA_BUNDLE',
+] as const;
+
 /** OpenCode `mcp` entry shape (local stdio server). */
 export type OpenCodeMcpLocal = {
   type: 'local';
@@ -18,20 +32,36 @@ export type OpenCodeMcpRemote = {
 
 export type OpenCodeMcpEntry = OpenCodeMcpLocal | OpenCodeMcpRemote;
 
+function inheritedNetworkEnv(env: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(
+    MCP_NETWORK_ENV_KEYS.flatMap((key) => {
+      const value = env[key];
+      return value ? [[key, value]] : [];
+    }),
+  );
+}
+
 /**
  * Map NanoClaw v2 MCP definitions (same shape as Claude Agent SDK) into
  * OpenCode config `mcp` field. Stdio-only until `McpServerConfig` gains remote.
+ *
+ * OpenCode treats `environment` as the subprocess env for local MCP servers.
+ * Preserve proxy/CA variables so OneCLI-backed credential injection keeps
+ * working for MCP tool calls inside the agent container.
  */
 export function mcpServersToOpenCodeConfig(
   servers: Record<string, McpServerConfig> | undefined,
+  env: Record<string, string | undefined> = process.env,
 ): Record<string, OpenCodeMcpEntry> {
   const out: Record<string, OpenCodeMcpEntry> = {};
   if (!servers) return out;
+  const networkEnv = inheritedNetworkEnv(env);
   for (const [name, cfg] of Object.entries(servers)) {
+    const environment = { ...networkEnv, ...cfg.env };
     out[name] = {
       type: 'local',
       command: [cfg.command, ...cfg.args],
-      ...(Object.keys(cfg.env).length > 0 ? { environment: cfg.env } : {}),
+      ...(Object.keys(environment).length > 0 ? { environment } : {}),
       enabled: true,
     };
   }
