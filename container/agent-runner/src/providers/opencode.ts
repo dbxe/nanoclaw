@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as http from 'http';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 
@@ -122,14 +123,102 @@ function positiveNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
+function shouldStripOpenAiPromptCacheKey(baseUrl: string | undefined): boolean {
+  if (process.env.OPENCODE_STRIP_OPENAI_PROMPT_CACHE_KEY === '1') return true;
+  if (!baseUrl) return false;
+  try {
+    return new URL(baseUrl).hostname === 'api.openai.com';
+  } catch {
+    return false;
+  }
+}
+
+function startOpenAiCompatProxy(targetBaseUrl: string): Promise<{ baseUrl: string; server: http.Server }> {
+  return new Promise((resolve, reject) => {
+    const normalizedTarget = targetBaseUrl.replace(/\/$/, '');
+    const server = http.createServer(async (req, res) => {
+      try {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+
+        let body: Buffer | string | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
+        const contentType = req.headers['content-type'] || '';
+        if (body && String(contentType).includes('application/json')) {
+          const payload = JSON.parse(body.toString('utf8'));
+          if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            delete payload.promptCacheKey;
+          }
+          body = JSON.stringify(payload);
+        }
+
+        const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+        const target = new URL(normalizedTarget);
+        const targetPrefix = target.pathname.replace(/\/$/, '');
+        const incomingPath = incoming.pathname.startsWith(`${targetPrefix}/`)
+          ? incoming.pathname.slice(targetPrefix.length)
+          : incoming.pathname;
+        target.pathname = `${targetPrefix}${incomingPath}`;
+        target.search = incoming.search;
+
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (!value || ['host', 'content-length'].includes(key.toLowerCase())) continue;
+          if (Array.isArray(value)) {
+            for (const item of value) headers.append(key, item);
+          } else {
+            headers.set(key, value);
+          }
+        }
+        if (typeof body === 'string') {
+          headers.set('content-type', 'application/json');
+          headers.set('content-length', Buffer.byteLength(body).toString());
+        }
+
+        const upstream = await fetch(target, {
+          method: req.method,
+          headers,
+          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
+        });
+
+        res.statusCode = upstream.status;
+        upstream.headers.forEach((value, key) => {
+          if (!['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) {
+            res.setHeader(key, value);
+          }
+        });
+        res.end(Buffer.from(await upstream.arrayBuffer()));
+      } catch (err) {
+        res.statusCode = 502;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ error: { message: err instanceof Error ? err.message : String(err) } }));
+      }
+    });
+
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('OpenAI compatibility proxy did not get a TCP port'));
+        return;
+      }
+      resolve({ baseUrl: `http://127.0.0.1:${address.port}/v1`, server });
+    });
+  });
+}
+
+function buildOpenCodeConfig(options: ProviderOptions, baseUrlOverride?: string): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const providerName = process.env.OPENCODE_PROVIDER_NAME || provider;
   const providerPackage =
     process.env.OPENCODE_PROVIDER_PACKAGE || (provider === 'anthropic' ? undefined : '@ai-sdk/openai-compatible');
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
-  const baseUrl = process.env.OPENCODE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL;
+  const baseUrl =
+    baseUrlOverride || process.env.OPENCODE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY || 'placeholder';
   const outputLimit = positiveNumber(process.env.OPENCODE_MODEL_OUTPUT_LIMIT);
   const contextLimit = positiveNumber(process.env.OPENCODE_MODEL_CONTEXT_LIMIT) ?? 32768;
@@ -182,6 +271,7 @@ type SharedRuntime = {
   client: OpencodeClient;
   stream: AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
   streamRelease: () => void;
+  proxyServer?: http.Server;
 };
 
 let sharedRuntime: SharedRuntime | null = null;
@@ -213,7 +303,14 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     if (sharedRuntime) {
       destroySharedRuntime();
     }
-    const config = buildOpenCodeConfig(options);
+    const upstreamBaseUrl = process.env.OPENCODE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL;
+    const proxy = shouldStripOpenAiPromptCacheKey(upstreamBaseUrl)
+      ? await startOpenAiCompatProxy(upstreamBaseUrl as string)
+      : undefined;
+    if (proxy) {
+      log(`OpenAI compatibility proxy enabled at ${proxy.baseUrl}`);
+    }
+    const config = buildOpenCodeConfig(options, proxy?.baseUrl);
     const { url, proc } = await spawnOpencodeServer(config);
     const client = createOpencodeClient({ baseUrl: url });
     const sub = await client.event.subscribe();
@@ -225,6 +322,7 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
       streamRelease: () => {
         void stream.return?.(undefined);
       },
+      proxyServer: proxy?.server,
     };
     sharedConfigKey = key;
     sharedInit = null;
@@ -243,6 +341,11 @@ export function destroySharedRuntime(): void {
     }
     try {
       sharedRuntime.proc.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+    try {
+      sharedRuntime.proxyServer?.close();
     } catch {
       /* ignore */
     }
