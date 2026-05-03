@@ -36,6 +36,9 @@ describe('mcpServersToOpenCodeConfig', () => {
         SESSION_HEARTBEAT_PATH: '/workspace/.heartbeat',
         HTTPS_PROXY: 'http://proxy.example',
         NODE_EXTRA_CA_CERTS: '/tmp/proxy-ca.pem',
+        SSL_CERT_FILE: '/tmp/proxy-ca.pem',
+        REQUESTS_CA_BUNDLE: '/tmp/proxy-ca.pem',
+        CURL_CA_BUNDLE: '/tmp/proxy-ca.pem',
       },
       enabled: true,
     });
@@ -47,6 +50,9 @@ describe('mcpServersToOpenCodeConfig', () => {
         FOO: 'bar',
         HTTPS_PROXY: 'http://proxy.example',
         NODE_EXTRA_CA_CERTS: '/tmp/proxy-ca.pem',
+        SSL_CERT_FILE: '/tmp/proxy-ca.pem',
+        REQUESTS_CA_BUNDLE: '/tmp/proxy-ca.pem',
+        CURL_CA_BUNDLE: '/tmp/proxy-ca.pem',
       },
       enabled: true,
     });

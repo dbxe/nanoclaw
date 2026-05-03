@@ -33,12 +33,18 @@ export type OpenCodeMcpRemote = {
 export type OpenCodeMcpEntry = OpenCodeMcpLocal | OpenCodeMcpRemote;
 
 function inheritedNetworkEnv(env: Record<string, string | undefined>): Record<string, string> {
-  return Object.fromEntries(
+  const inherited = Object.fromEntries(
     MCP_NETWORK_ENV_KEYS.flatMap((key) => {
       const value = env[key];
       return value ? [[key, value]] : [];
     }),
   );
+  if (inherited.NODE_EXTRA_CA_CERTS) {
+    inherited.SSL_CERT_FILE ||= inherited.NODE_EXTRA_CA_CERTS;
+    inherited.REQUESTS_CA_BUNDLE ||= inherited.NODE_EXTRA_CA_CERTS;
+    inherited.CURL_CA_BUNDLE ||= inherited.NODE_EXTRA_CA_CERTS;
+  }
+  return inherited;
 }
 
 /**
